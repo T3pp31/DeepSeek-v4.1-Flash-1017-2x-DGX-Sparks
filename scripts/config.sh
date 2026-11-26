@@ -97,6 +97,10 @@ image_hash() {
     cat zig/patches/*.patch 2>/dev/null
     cat zig/patches-inputs/*.patch 2>/dev/null
     cat zig/Dockerfile
+    cat rust/Cargo.toml rust/Cargo.lock 2>/dev/null
+    cat rust/crates/dsv41-core/Cargo.toml rust/crates/dsv41-core/src/*.rs 2>/dev/null
+    cat rust/crates/dsv41-imgdec/Cargo.toml rust/crates/dsv41-imgdec/src/*.rs 2>/dev/null
+    cat rust/crates/dsv41-ctl/Cargo.toml rust/crates/dsv41-ctl/src/*.rs 2>/dev/null
     echo "$TF_REPO $TF_REF $INPUTS_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE"
   ) | sha256sum | cut -c1-12
 }
@@ -133,7 +137,7 @@ PARALLEL="${PARALLEL:-4}"              # requests at once (the engine's streams,
 ROUND_ROWS="${ROUND_ROWS:-}"           # empty or 16: the pinned kit only has row kernels through 16 (issue #23)
 MAX_TOKENS="${MAX_TOKENS:-32768}"      # a reply's budget when a request sets none
 THINKING="${THINKING:-1}"              # think first unless a request turns it off
-# The reasoning effort when a request names none: low, medium, high or xhigh (empty: the chat template's default)
+# The reasoning effort when a request names none: low, medium, high, xhigh or max (empty: the chat template's default)
 REASONING_EFFORT="${REASONING_EFFORT:-}"
 # Reasoning tokens a reply may spend before the engine closes the think block itself (tensorfold-native --thinking-budget; empty: no
 # cap). A request's own thinking_budget wins. With no cap, a turn on a hard task can spend its whole MAX_TOKENS thinking and end
@@ -226,10 +230,10 @@ HEAD_NFS_VOLUME="${HEAD_NFS_VOLUME:-dsv41-hf-head}"
 #  - MIN_AVAIL_GIB: start.sh refuses to start unless each Spark has this much memory available (the weights, 98.9 GiB, plus
 #    the engine's own 12.2 GiB reserve). 0 turns the check off. Available is MemAvailable plus the pages parked on the
 #    kernel's per-CPU free lists beyond their resting level, as the engine's startup budget counts it (GLM 0119;
-#    scripts/memavail.sh): a docker save | load or an image build leaves several GiB there for a minute or two.
+#    dsv41-ctl memavail): a docker save | load or an image build leaves several GiB there for a minute or two.
 #    MIN_AVAIL_WAIT_S: it re-reads the memory for up to this many seconds before refusing (0 reads once): the page cache a
 #    build or a large copy just left is counted as available only as it is written back, and parked pages drain (120).
-#  - MEMGUARD_GIB: scripts/memguard.sh runs on both Sparks while the server is up and kills the rank's container when the
+#  - MEMGUARD_GIB: dsv41-memguard runs on both Sparks while the server is up and kills the rank's container when the
 #    memory available stays under this floor for MEMGUARD_HOLD_S seconds without coming back over it (GiB, decimals allowed:
 #    2.5; 0 turns the guard off), or at once when it falls under MEMGUARD_HARD_GIB. A long prompt's workspace takes a few GiB
 #    for a moment and gives them back: that dip is logged, not killed.
@@ -252,6 +256,22 @@ _c() { [[ -t "$1" ]] && printf '\033[%sm' "$2" || true; }
 log()  { printf '%s[%s]%s %s\n' "$(_c 1 '1;36')" "$(basename "$0")" "$(_c 1 0)" "$*"; }
 warn() { printf '%s[%s] WARN:%s %s\n' "$(_c 2 '1;33')" "$(basename "$0")" "$(_c 2 0)" "$*" >&2; }
 die()  { printf '%s[%s] ERROR:%s %s\n' "$(_c 2 '1;31')" "$(basename "$0")" "$(_c 2 0)" "$*" >&2; exit 1; }
+
+# Resolve an installed Rust binary (dsv41-ctl, dsv41-memguard, dsv41-imgdec, dsv41-tools).
+dsv41_bin() {
+  local name=$1 cand
+  for cand in \
+    "${DSV41_BIN_DIR:+$DSV41_BIN_DIR/$name}" \
+    "$_cfg_root/rust/target/release/$name" \
+    "$HOME/.local/bin/$name" \
+    "$(command -v "$name" 2>/dev/null || true)"; do
+    if [[ -n "$cand" && -x "$cand" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  die "$name binary not found: build and install it first with ./install.sh"
+}
 
 [[ -z "${HF_TOKEN:-}" ]] || export HF_TOKEN
 ablit_notice() {
@@ -282,7 +302,7 @@ engram_in_container() { echo "/hf/hub/models--${ENGRAM_ID//\//--}/snapshots/$(en
 served_in_container() { echo "/hf/$DATA_SUB/model"; }
 
 # What scripts/prepare.sh last left ready (start.sh runs it again when this line changes). "+stock-dtypes": an overlay
-# checkpoint prepared before scripts/ablit_stock_dtypes.py gets that step on the next start.
+# checkpoint prepared before dsv41-ctl ablit-stock-dtypes gets that step on the next start.
 PREPARED_MARKER="$STATE_DIR/prepared"
 # Every field is quoted (printf %q), so a value holding another field's text cannot shift into it, and the template's
 # sha256 is part of it (a changed model/chat_template.jinja is served only after prepare.sh linked it again). It fails
@@ -320,7 +340,7 @@ API_KEY_IN_CONTAINER=/run/secrets/tensorfold-api-key
 api_key_ensure() {
   [[ -e "$API_KEY_FILE" ]] && { [[ "$(stat -c %a "$API_KEY_FILE")" =~ ^[0-7]00$ ]] || chmod 600 "$API_KEY_FILE"; return 0; }
   mkdir -p "$(dirname "$API_KEY_FILE")"
-  ( umask 077; python3 -c 'import secrets; print("sk-tf-" + secrets.token_urlsafe(32))' > "$API_KEY_FILE" ) || die "could not write $API_KEY_FILE"
+  ( umask 077; "$(dsv41_bin dsv41-ctl)" gen-api-key > "$API_KEY_FILE" ) || die "could not write $API_KEY_FILE"
   log "Generated an API key in $API_KEY_FILE (mode 600); clients send it as Authorization: Bearer \$(cat $API_KEY_FILE)"
 }
 # api_header_file: a mode-600 file holding the Authorization header, for curl -H @file (the key stays out of ps)

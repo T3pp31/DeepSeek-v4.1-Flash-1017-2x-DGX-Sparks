@@ -78,7 +78,12 @@ if [[ $REBUILD -eq 1 || "$built" != "$hash" ]]; then
   log "Building $IMAGE (TensorFold ${TF_REF:0:12} + inputs' tools ${INPUTS_REF:0:12}, $(compgen -G 'zig/patches/*.patch' | wc -l) engine + $(compgen -G 'zig/patches-inputs/*.patch' | wc -l) inputs patches, Zig $ZIG_VERSION; two Zig builds, ~6 min on a Spark)"
   ctx=$(mktemp -d "$STATE_DIR/build.XXXXXX")
   trap 'rm -rf -- "$ctx"' EXIT
-  mkdir -p "$ctx/zig"; cp -r zig/patches "$ctx/zig/patches"; cp -r zig/patches-inputs "$ctx/zig/patches-inputs"; cp zig/Dockerfile "$ctx/Dockerfile"
+  mkdir -p "$ctx/zig" "$ctx/rust"
+  cp -r zig/patches "$ctx/zig/patches"
+  cp -r zig/patches-inputs "$ctx/zig/patches-inputs"
+  cp zig/Dockerfile "$ctx/Dockerfile"
+  cp rust/Cargo.toml rust/Cargo.lock "$ctx/rust/"
+  cp -r rust/crates "$ctx/rust/crates"
   nocache=(); [[ $REBUILD -eq 1 ]] && nocache=(--no-cache)
   docker build "${nocache[@]}" -t "$IMAGE" -f "$ctx/Dockerfile" --build-arg BASE_IMAGE="$BASE_IMAGE" \
     --build-arg TF_REPO="$TF_REPO" --build-arg TF_REF="$TF_REF" --build-arg INPUTS_REF="$INPUTS_REF" \
@@ -158,10 +163,10 @@ if [[ "$ABLIT" == 1 ]]; then
   done
   # The overlay script casts four MTP tensors to F32 for another engine; this one reads the drafter's confidence head
   # as F16 whatever the file holds, so an F32 copy makes it draft almost nothing. Give them their stock dtypes back
-  # (scripts/ablit_stock_dtypes.py; headers only when they already match).
+  # (dsv41-ctl ablit-stock-dtypes; headers only when they already match).
   stock_dtypes() {
-    in_hf -v "$PWD/scripts/ablit_stock_dtypes.py:/ablit_stock_dtypes.py:ro" --entrypoint python3 "$IMAGE" \
-      /ablit_stock_dtypes.py "/hf/hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)" "$1"
+    in_hf --entrypoint dsv41-ctl "$IMAGE" \
+      ablit-stock-dtypes "/hf/hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)" "$1"
   }
   mkdir -p "$DATA_DIR"
   if [[ ! -f "$DATA_DIR/checkpoint/.ablit-ready" ]]; then
@@ -177,8 +182,8 @@ if [[ "$ABLIT" == 1 ]]; then
     in_hf --entrypoint python3 "$IMAGE" "/hf/$overlay_sub/apply_mia29_wo_b_graft.py" \
       --src "/hf/$DATA_SUB/stock.new" --dst "/hf/$DATA_SUB/checkpoint.new" \
       --wo-b "/hf/$overlay_sub/$ABLIT_SIDECAR" || die "applying the matching Mia overlay failed; rerun prepare.sh to retry"
-    python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["n_edited"] == 104, "expected 104 Mia overlay tensors"' \
-      "$DATA_DIR/checkpoint.new/ABLIT_META.json" || die "Mia overlay did not replace all 104 tensors"
+    "$(dsv41_bin dsv41-ctl)" json-field "$DATA_DIR/checkpoint.new/ABLIT_META.json" n_edited --expect-int 104 >/dev/null ||
+      die "Mia overlay did not replace all 104 tensors"
     stock_dtypes "/hf/$DATA_SUB/checkpoint.new" || die "could not give the overlay checkpoint its stock dtypes back"
     touch "$DATA_DIR/checkpoint.new/.ablit-ready"
     rm -rf "$DATA_DIR/checkpoint"
@@ -212,7 +217,7 @@ if [[ ! -s "$KIT_DIR/kit/rope-plain-cos.f32" || ! -s "$KIT_DIR/kit/rope-compress
 fi
 if [[ ! -s "$KIT_DIR/kit/vision/gate_bias_vl.safetensors" ]]; then
   log "Making the image routing bias (vision/gate_bias_vl.safetensors) from the checkpoint's gate.bias_vl tensors"
-  in_hf --entrypoint python3 "$IMAGE" $TOOLS/make_bias_vl.py "$SNAP_C" "$KIT_IN/vision/gate_bias_vl.safetensors" >/dev/null ||
+  in_hf --entrypoint dsv41-ctl "$IMAGE" make-bias-vl "$SNAP_C" "$KIT_IN/vision/gate_bias_vl.safetensors" >/dev/null ||
     die "could not make the image routing bias: does $MODEL_ID hold the gates' bias_vl tensors?"
 fi
 # every file MANIFEST lists, by sha256; the image bias is 1017's own, so it alone may differ from the release the kit was made for
@@ -232,7 +237,7 @@ if [[ ! -s "$DATA_DIR/dsv41_token_map.json" ]]; then
   in_hf --entrypoint python3 "$IMAGE" $TOOLS/make_token_map.py "$SNAP_C" "/hf/$DATA_SUB/dsv41_token_map.json" >/dev/null
 fi
 tm=$(sha256sum "$DATA_DIR/dsv41_token_map.json" | cut -d' ' -f1)
-if [[ "$tm" == "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["token_map_sha256"])' "$KIT_DIR/kit/engram.json")" ]]; then
+if [[ "$tm" == "$("$(dsv41_bin dsv41-ctl)" json-field "$KIT_DIR/kit/engram.json" token_map_sha256)" ]]; then
   log "Token map: the same bytes the kit's Engram fixtures were recorded with"
 else
   warn "the token map ($tm) differs from the kit's recorded one: the 1017 tokenizer is not the one the kit was recorded with (the map has the config's compressed-vocabulary size, which make_token_map.py checks)"

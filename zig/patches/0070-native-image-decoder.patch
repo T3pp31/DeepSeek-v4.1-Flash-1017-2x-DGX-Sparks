@@ -1,0 +1,28 @@
+From: DeepSeek-V4.1 Rust Migration
+Subject: [PATCH] dsv41: allow native image decoder subprocess via TENSORFOLD_IMAGE_DECODER
+
+When TENSORFOLD_IMAGE_DECODER is set to an executable implementing pil.zig's
+stdin/stdout binary protocol (such as /opt/tensorfold/bin/dsv41-imgdec), spawn
+it directly instead of starting a Python + Pillow child process. Unset, the
+original `python3 -I -c` Pillow child is used as before.
+---
+ zig/src/families/dsv41/pil.zig | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/zig/src/families/dsv41/pil.zig b/zig/src/families/dsv41/pil.zig
+index 0000000..1111111 100644
+--- a/zig/src/families/dsv41/pil.zig
++++ b/zig/src/families/dsv41/pil.zig
+@@ -50,7 +50,11 @@ pub const Pil = struct {
+ 
+     /// The child, its reader, and Pillow's greeting.
+     fn spawn(p: *Pil) !void {
+-        p.child = try std.process.spawn(p.io, .{ .argv = &.{ "python3", "-I", "-c", script }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
++        const argv: []const []const u8 = if (std.c.getenv("TENSORFOLD_IMAGE_DECODER")) |bin|
++            &.{std.mem.span(bin)}
++        else
++            &.{ "python3", "-I", "-c", script };
++        p.child = try std.process.spawn(p.io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
+         errdefer p.child.kill(p.io);
+         p.reader = p.child.stdout.?.readerStreaming(p.io, &p.buf);
+         var hello: [16]u8 = undefined;
