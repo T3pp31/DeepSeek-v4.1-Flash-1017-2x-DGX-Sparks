@@ -240,7 +240,7 @@ port_validate() {
 # ---------------------------------------------------------------- the mapping (the one place)
 # port_map fills:
 #   PORT_ENV     NAME=value pairs both ranks get, identical (docker -e)
-#   PORT_SERVE   rank 0's extra `tensorfold-native serve` flags (checked by scripts/zig_flags.py before anything stops)
+#   PORT_SERVE   rank 0's extra `tensorfold-native serve` flags (checked by dsv41-ctl zig-flags before anything stops)
 #   POOL         set to the pool KV_SHARD=1 needs when it is empty (port_pool_set); start.sh then gives both ranks
 #                TF_DS_POOL and TF_DS_WINDOW, and rank 1 --pool, from it, as zig/patches/0008 does for any POOL
 #   PORT_RANK1_ENV  RANK1_EXTRA_ENV's words (tests only; empty for serving), added last to rank 1's environment

@@ -134,16 +134,18 @@ link_info() {
 # is up and addressed there), and the second PCIe link of the same QSFP port (a DGX Spark's "twin", which lives in its
 # own subnet, so the subnet scan below cannot see it).
 rails() {
-  local dev=$1 gid=$2 net cidr hcas other ip idx
+  local dev=$1 gid=$2 net cidr hcas other ip idx ctl
+  ctl=$(PATH="${DSV41_BIN_DIR:+$DSV41_BIN_DIR:}${_cfg_root:+$_cfg_root/rust/target/release:}$HOME/.cache/dsv41-tensorfold/bin:$HOME/.local/bin:$PATH" command -v dsv41-ctl 2>/dev/null || true)
+  [[ -n "$ctl" ]] || { echo "rails: dsv41-ctl not found on $(hostname); run ./install.sh" >&2; return 1; }
   cidr=$(ip -o -4 addr show dev "$dev" | awk '{print $4}' | head -1)
-  net=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)" "$cidr")
+  net=$("$ctl" cidr-network "$cidr")
   hcas=$(ls /sys/class/net/"$dev"/device/infiniband | head -1)
   for n in /sys/class/net/*; do
     other=${n##*/}
     [[ "$other" == "$dev" || ! -d $n/device/infiniband || "$(cat $n/operstate 2>/dev/null)" != up ]] && continue
     ip=$(ip -o -4 addr show dev "$other" | awk '{print $4}' | head -1)
     [[ -n "$ip" ]] || continue
-    python3 -c "import ipaddress,sys; sys.exit(ipaddress.ip_interface(sys.argv[1]) not in ipaddress.ip_network(sys.argv[2]) and ipaddress.ip_interface(sys.argv[1]).ip not in ipaddress.ip_network(sys.argv[2]))" "$ip" "$net" || continue
+    "$ctl" cidr-contains "$ip" "$net" || continue
     idx=$(ls $n/device/infiniband | head -1)
     [[ "$(cat /sys/class/infiniband/$idx/ports/1/gid_attrs/types/$gid 2>/dev/null)" == *v2* ]] || continue
     hcas+=",$idx"
@@ -338,13 +340,17 @@ head_hf_mount() {
   echo "$HEAD_NFS_VOLUME"
 }
 
-# mem_available_gib: MemAvailable here, in GiB (one decimal)
 # mem_available_gib: what start.sh's MIN_AVAIL_GIB check counts here, MemAvailable plus the pages parked on the per-CPU
-# free lists (mem_counting below; plain MemAvailable if /proc/zoneinfo cannot be read)
+# free lists (mem_counting below; plain MemAvailable if /proc/zoneinfo or dsv41-ctl is unavailable)
 mem_available_gib() { local m; m=$(mem_counting 2>/dev/null) && echo "${m%% *}" || awk '/^MemAvailable:/ {printf "%.1f", $2 / 1048576}' /proc/meminfo; }
 # mem_counting: MemAvailable plus the pages parked on the per-CPU free lists, as the engine's startup budget counts it
-# (scripts/memavail.sh; start.sh's MIN_AVAIL_GIB check)
-source "${_cfg_root:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/memavail.sh"
+# (dsv41-ctl memavail; self-contained so await_memory can send it to the worker via declare -f)
+mem_counting() {
+  local ctl
+  ctl=$(PATH="${DSV41_BIN_DIR:+$DSV41_BIN_DIR:}${_cfg_root:+$_cfg_root/rust/target/release:}$HOME/.cache/dsv41-tensorfold/bin:$HOME/.local/bin:$PATH" command -v dsv41-ctl 2>/dev/null || true)
+  [[ -n "$ctl" ]] || return 1
+  "$ctl" memavail "$@"
+}
 
 # await_memory: sets HERE_GB and WORKER_GB (GiB) to the memory available on this Spark and on worker 1, once both reach
 # MIN_AVAIL_GIB or after MIN_AVAIL_WAIT_S seconds at the latest (returns 1 then; the caller words the refusal). A build or a large
@@ -362,25 +368,27 @@ await_memory() {
   done
 }
 
-# The memory guard (scripts/memguard.sh) on this Spark and on the worker, which gets a copy of the script.
+# The memory guard (dsv41-memguard) on this Spark and on the worker, which gets an atomic copy of the binary.
 MEMGUARD_REMOTE_DIR='$HOME/.cache/dsv41-tensorfold'
 memguard_start() {
   awk -v g="$MEMGUARD_GIB" 'BEGIN {exit !(g > 0)}' || return 0
-  "$_cfg_root/scripts/memguard.sh" start "$CONTAINER_NAME" "$MEMGUARD_GIB" "$LOG_DIR/memguard.log" "$STATE_DIR/memguard.pid" "$MEMGUARD_HOLD_S" "$MEMGUARD_HARD_GIB" ||
+  local mg i
+  mg=$(dsv41_bin dsv41-memguard)
+  "$mg" start "$CONTAINER_NAME" "$MEMGUARD_GIB" "$LOG_DIR/memguard.log" "$STATE_DIR/memguard.pid" "$MEMGUARD_HOLD_S" "$MEMGUARD_HARD_GIB" ||
     die "the memory guard did not start here"
-  local i
   for i in $(worker_ids); do
-    worker "$i" "mkdir -p $MEMGUARD_REMOTE_DIR/logs && cat > $MEMGUARD_REMOTE_DIR/memguard.sh && chmod +x $MEMGUARD_REMOTE_DIR/memguard.sh" \
-      < "$_cfg_root/scripts/memguard.sh" || die "could not copy the memory guard to $(worker_host "$i")"
-    worker "$i" "$MEMGUARD_REMOTE_DIR/memguard.sh start '$CONTAINER_NAME' $MEMGUARD_GIB $MEMGUARD_REMOTE_DIR/logs/memguard.log $MEMGUARD_REMOTE_DIR/memguard.pid $MEMGUARD_HOLD_S $MEMGUARD_HARD_GIB" ||
+    worker "$i" "mkdir -p $MEMGUARD_REMOTE_DIR/bin $MEMGUARD_REMOTE_DIR/logs && cat > $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard.tmp && chmod 0755 $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard.tmp && mv -f $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard.tmp $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard" \
+      < "$mg" || die "could not copy the memory guard to $(worker_host "$i")"
+    worker "$i" "$MEMGUARD_REMOTE_DIR/bin/dsv41-memguard start '$CONTAINER_NAME' $MEMGUARD_GIB $MEMGUARD_REMOTE_DIR/logs/memguard.log $MEMGUARD_REMOTE_DIR/memguard.pid $MEMGUARD_HOLD_S $MEMGUARD_HARD_GIB" ||
       die "the memory guard did not start on $(worker_host "$i")"
   done
   log "Memory guard on: each rank's container is killed when the memory available stays under $MEMGUARD_GIB GiB for $MEMGUARD_HOLD_S s, or falls under $MEMGUARD_HARD_GIB GiB (log: memguard.log)"
 }
 memguard_stop() {
-  local i
-  "$_cfg_root/scripts/memguard.sh" stop "$STATE_DIR/memguard.pid" 2>/dev/null || true
+  local i mg
+  mg=$(dsv41_bin dsv41-memguard 2>/dev/null || true)
+  [[ -z "$mg" ]] || "$mg" stop "$STATE_DIR/memguard.pid" 2>/dev/null || true
   for i in $(configured_workers); do
-    worker "$i" "[ -x $MEMGUARD_REMOTE_DIR/memguard.sh ] && $MEMGUARD_REMOTE_DIR/memguard.sh stop $MEMGUARD_REMOTE_DIR/memguard.pid; true" 2>/dev/null || true
+    worker "$i" "[ -x $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard ] && $MEMGUARD_REMOTE_DIR/bin/dsv41-memguard stop $MEMGUARD_REMOTE_DIR/memguard.pid; true" 2>/dev/null || true
   done
 }

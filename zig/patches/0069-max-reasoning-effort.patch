@@ -1,0 +1,36 @@
+diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
+index c9688a9..21bb5f9 100644
+--- a/zig/src/server/cli.zig
++++ b/zig/src/server/cli.zig
+@@ -52,7 +52,7 @@ pub const flags = [_]Flag{
+     .{ .name = "--min-p", .native = true },
+     .{ .name = "--thinking", .kind = .store_true, .native = true },
+     .{ .name = "--no-thinking", .kind = .store_true, .native = true },
+-    .{ .name = "--reasoning-effort", .choices = &.{ "low", "medium", "high", "xhigh" }, .native = true },
++    .{ .name = "--reasoning-effort", .choices = &.{ "low", "medium", "high", "xhigh", "max" }, .native = true },
+     .{ .name = "--thinking-budget", .native = true },
+     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
+     .{ .name = "--drop-reasoning-history", .kind = .store_true, .native = true },
+@@ -378,7 +378,8 @@ test "parse and capabilities share the table" {
+     try std.testing.expectEqual(@as(usize, 2), args.api_key.len);
+     try std.testing.expect(!args.thinking);
+     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--drafter", "x" }, &u));
+-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "max" }, &u));
++    try std.testing.expectEqualStrings("max", (try parse(a, &.{ "m", "--reasoning-effort", "max" }, &u)).reasoning_effort.?);
++    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "invalid" }, &u));
+     try std.testing.expectEqual(@as(?f64, 12.5), (try parse(a, &.{ "m", "--prompt-cache-gib", "12.5" }, &u)).prompt_cache_gib);
+     try std.testing.expectEqual(@as(?f64, 0), (try parse(a, &.{ "m", "--prompt-cache-gib", "0" }, &u)).prompt_cache_gib);
+     try std.testing.expect(!(try parse(a, &.{ "m", "--prompt-cache-gib", "16" }, &u)).prompt_cache_over_cap);
+diff --git a/zig/src/server/main.zig b/zig/src/server/main.zig
+index 7738831..38c4e89 100644
+--- a/zig/src/server/main.zig
++++ b/zig/src/server/main.zig
+@@ -9,7 +9,7 @@ const serve = @import("serve.zig");
+ const hf_text = @import("hf_text.zig");
+ const checkpoint_cli = @import("checkpoint_cli");
+ 
+-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--drop-reasoning-history] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
++const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh,max}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--drop-reasoning-history] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+ 
+ pub fn main(init: std.process.Init) !u8 {
+     const gpa = init.gpa;

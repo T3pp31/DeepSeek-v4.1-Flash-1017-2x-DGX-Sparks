@@ -1,0 +1,20 @@
+[package]
+name = "dsv41-ctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dsv41-ctl"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+clap.workspace = true
+dsv41-core = { path = "../dsv41-core" }
+getrandom.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+half.workspace = true

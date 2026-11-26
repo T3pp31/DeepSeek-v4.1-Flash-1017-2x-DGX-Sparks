@@ -70,7 +70,7 @@ if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" 
   api_host="$HOST"; [[ "$HOST" == 0.0.0.0 || "$HOST" == "::" ]] && api_host=127.0.0.1
   [[ "$api_host" == *:* ]] && api_host="[$api_host]"
   busy=$(curl -s --max-time 3 "http://$api_host:$PORT/health" 2>/dev/null |
-         python3 -c 'import json,sys; d = json.load(sys.stdin); print((d.get("live") or {}).get("connections", d.get("requests_running", 0)))' 2>/dev/null || echo 0)
+         "$(dsv41_bin dsv41-ctl)" health-busy 2>/dev/null || echo 0)
   (( busy == 0 )) || warn "$busy request(s) still running will be cut off"
 fi
 if [[ "${DRY_RUN:-0}" == 1 ]]; then

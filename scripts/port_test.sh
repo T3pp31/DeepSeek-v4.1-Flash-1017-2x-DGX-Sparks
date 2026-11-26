@@ -384,9 +384,14 @@ else
   echo "skip spill_dir_probe (needs Linux: readlink -m, findmnt, df -B1, stat -c)"
 fi
 
-# ---- scripts/memavail.sh: MIN_AVAIL_GIB counts the pages parked on the per-CPU free lists, as the engine's 0119 does
+# ---- dsv41-ctl memavail: MIN_AVAIL_GIB counts the pages parked on the per-CPU free lists, as the engine's 0119 does
 # (native/cuda_memory.zig parkedBytes): its Zig tests' synthetic /proc/zoneinfo cases, translated
 # zone <node> <name> <high_min or -> [counts...]: one zone's block as the kernel prints it (no counts: no pagesets)
+_memavail_ctl=""
+for _cand in "${DSV41_BIN_DIR:+$DSV41_BIN_DIR/dsv41-ctl}" "$here/../rust/target/release/dsv41-ctl" "$here/../rust/target/debug/dsv41-ctl" "$HOME/.local/bin/dsv41-ctl" "$(command -v dsv41-ctl 2>/dev/null || true)"; do
+  if [[ -n "$_cand" && -x "$_cand" ]]; then _memavail_ctl=$_cand; break; fi
+done
+_memavail_setup="mem_counting() { '$_memavail_ctl' memavail \"\$@\"; }"
 zone() {
   local node=$1 name=$2 hm=$3 c n=0; shift 3
   printf 'Node %s, zone %8s\n  pages free     10\n        managed  1000\n      nr_free_cma  0\n' "$node" "$name"
@@ -419,7 +424,7 @@ zone 0 Normal - 1000 1000 1000 1000 > "$mt/z-old-small"
 { zone 0 Normal 2146 500000; printf '  pagesets\n    cpu: 0\n              count:    abc\n'; } > "$mt/z-bad"
 printf '  pagesets\n    cpu: 0\n              count:    600000\r\n              high_min: 2146\r\n' > "$mt/z-crlf"
 # mc <name> <meminfo> <zoneinfo> <want: avail GiB, parked GiB, parked bytes>
-mc() { case_ "parked pages: $1" 0 "source '$here/memavail.sh'" "$expect; expect \"\$(mem_counting '$mt/$2' '$mt/$3' 4096)\" '$4'"; }
+mc() { case_ "parked pages: $1" 0 "$_memavail_setup" "$expect; expect \"\$(mem_counting '$mt/$2' '$mt/$3' 4096)\" '$4'"; }
 many=$(( (200000 + 3143 + 2332 + 17 + 300000 + 400000 - 8 * 2146) * 4096 ))
 mc "every CPU, zone and node, less each list's resting level" meminfo z-many "$(awk -v b=$many 'BEGIN {printf "%.1f %.1f %.0f", 100 + b / 2^30, b / 2^30, b}')"
 mc "an image copy's 6 GiB raise the budget by 6 GiB" meminfo z-six "106.0 6.0 6442450944"
@@ -432,12 +437,12 @@ mc "an unparsable count counts nothing" meminfo z-bad "100.0 0.0 0"
 mc "carriage returns are blanks" meminfo z-crlf "$(awk -v b=$(( (600000 - 2146) * 4096 )) 'BEGIN {printf "%.1f %.1f %.0f", 100 + b / 2^30, b / 2^30, b}')"
 mc "capped at MemTotal" meminfo-high z-six "128.0 6.0 6442450944"
 mc "no zoneinfo: MemAvailable alone" meminfo missing "100.0 0.0 0"
-case_ "parked pages: no MemAvailable fails and prints nothing" 0 "source '$here/memavail.sh'" "
+case_ "parked pages: no MemAvailable fails and prints nothing" 0 "$_memavail_setup" "
   out=\$(mem_counting '$mt/meminfo-none' '$mt/z-many' 4096) && exit 1; [[ -z \"\$out\" ]]"
-case_ "parked pages: the page size from getconf by default" 0 "source '$here/memavail.sh'" "$expect
+case_ "parked pages: the page size from getconf by default" 0 "$_memavail_setup" "$expect
   expect \"\$(mem_counting '$mt/meminfo' '$mt/z-six')\" \"\$(mem_counting '$mt/meminfo' '$mt/z-six' \$(getconf PAGESIZE))\""
 if [[ -r /proc/meminfo ]]; then
-  case_ "parked pages: this host's /proc/meminfo and /proc/zoneinfo" 0 "source '$here/memavail.sh'" "
+  case_ "parked pages: this host's /proc/meminfo and /proc/zoneinfo" 0 "$_memavail_setup" "
     read -r a p b <<<\"\$(mem_counting)\"; [[ \"\$a\" =~ ^[0-9]+\\.[0-9]\$ && \"\$b\" =~ ^[0-9]+\$ ]] || { echo \"[\$a \$p \$b]\"; exit 1; }"
 fi
 

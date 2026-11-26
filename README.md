@@ -50,7 +50,7 @@ needle test and what was and was not checked are in [docs/measurements.md](docs/
 - **A direct ConnectX-7 link** (a QSFP cable, an IPv4 address on each end in one private subnet, a RoCE v2 GID); address both PCIe
   "twin" netdevs of the port on each Spark and both are used as rails.
 - **Key-based ssh** from the head (which runs `./start.sh` and the API) to the worker; Docker with the NVIDIA runtime on both; `git`,
-  `python3` and the `hf` CLI on the head.
+  `curl`, a C linker (`build-essential`), and the `hf` CLI on the head (Rust is installed automatically by `./install.sh`).
 - **Disk:** ~505 GB on the head plus ~25 GB for the image; ~310 GB on the worker plus the image.
 - **NFS:** the worker mounts the head's Hugging Face cache read-only (or both Sparks run from a local copy).
 
@@ -64,6 +64,7 @@ On the head:
 git clone https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks.git
 cd DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks
 cp scripts/local.sh.example scripts/local.sh     # set WORKER=user@192.0.2.2 in it (and FABRIC_PEER, see the paragraph below)
+./install.sh                                      # installs Rust (if needed), builds & installs native binaries on head + worker
 DRY_RUN=1 ./start.sh                              # prints what it would do; changes and starts nothing
 ./start.sh
 ```
@@ -85,8 +86,8 @@ The model thinks before it answers unless a request turns thinking off, so give 
 ./stop.sh                                                # stop both ranks and free their GPU memory
 docker logs -f dsv41-1017-exl3-tf                        # rank 0's log (here)
 ssh <worker> docker logs -f dsv41-1017-exl3-tf           # rank 1's log (why it exited, if it did)
-python3 tools/validate.py http://<head-address>:8888 --model DeepSeek-V4.1-Flash-1017   # text, thinking, tools, image, long prompt
-API_URL=http://<head-address>:8888 python3 tools/toolcheck.py    # also needle.py (a passphrase in ~195k tokens), end_of_turn.py
+dsv41-tools validate http://<head-address>:8888 --model DeepSeek-V4.1-Flash-1017   # text, thinking, tools, image, long prompt
+API_URL=http://<head-address>:8888 dsv41-tools toolcheck # also: dsv41-tools needle, end-of-turn, bench, exact, smoke, selftest
 ```
 
 ## Main settings
@@ -105,7 +106,7 @@ Settings come from the environment, `scripts/local.sh` or `.env`; every setting 
 | `ABLIT` | 0 | `1` applies the Keys overlay ([abliterated mode](docs/abliterated.md)) |
 | `API_KEY` | 0 | `1` makes rank 0 require a key; the API is open on the network by default |
 | `HOST`, `PORT`, `SERVED_NAME` | 0.0.0.0, 8888, `DeepSeek-V4.1-Flash-1017` | |
-| `MIN_AVAIL_GIB`, `MEMGUARD_GIB` | 112, 2.5 | the memory `start.sh` demands, and the floor under which `scripts/memguard.sh` kills a rank |
+| `MIN_AVAIL_GIB`, `MEMGUARD_GIB` | 112, 2.5 | the memory `start.sh` demands, and the floor under which `dsv41-memguard` kills a rank |
 | `SPILL_GIB`, `KV_SHARD`, `POOL` | 0 (off), 0 (off), empty | [spill v2 and KV sharding](docs/spill-and-kv-sharding.md) |
 
 Extra arguments to `./start.sh` go to rank 0's `tensorfold-native serve` after the defaults; every `TENSORFOLD_*`, `TF_DS_*`,
@@ -128,27 +129,22 @@ decode (`live`, the default; `zig/patches/README.md`, `0065`).
 ## Repository layout
 
 ```
+install.sh                   installs Rust (if missing), builds release binaries and deploys them to head + worker
 start.sh, stop.sh            start and stop both ranks
+rust/                        Rust Cargo workspace (dsv41-core, dsv41-memguard, dsv41-imgdec, dsv41-ctl, dsv41-tools)
 scripts/config.sh            every setting and its default (layered: environment, scripts/local.sh, .env)
 scripts/nodes.sh             the worker over ssh, the CX7 link and its RoCE rails, NFS volume, NCCL settings
 scripts/prepare.sh           image, downloads, kit, token map, weight files, the worker's NFS volume and disk
-scripts/memguard.sh          the memory watchdog start.sh runs on both Sparks (kills a rank's container below MEMGUARD_GIB)
-scripts/zig_flags.py         start.sh's check of rank 0's serve flags against the image's `capabilities --json`
 scripts/port.sh              the ported features' settings (spill v2, KV sharding, POOL), checks and engine mapping
-scripts/port_test.sh         checks of scripts/port.sh (no Sparks needed)
+scripts/port_test.sh         checks of scripts/port.sh and dsv41-ctl memavail (no Sparks needed)
 scripts/port-patches.sh      exports engine work after the port's series as zig/patches/0024-..., checked on a clean TF_REF
 scripts/publish-image.sh     pushes the built image to ghcr.io (only on purpose)
 zig/Dockerfile, zig/patches  the engine image; patches to the pinned engine (see `zig/patches/README.md`)
 model/chat_template.jinja    the chat template rank 0 serves
-tools/validate.py            an end-to-end check of a running server
-tools/bench.py               prefill, decode, multi-stream and needle measurements as JSON, with `--compare A.json B.json`
-tools/exact.py               records a server's replies (token hashes) on a fixed prompt set and compares two records: proves a new image equals the old one
-tools/smoke.py               a quick correctness check: health, stop strings, streaming, a tool call and its result
-tools/prompt_reuse.py        a conversation resumes from its kept prompt state (from the GLM-5.3-Flash recipe)
-tools/toolcheck.py, needle.py, end_of_turn.py, anthropiccheck.py   single checks, from the GLM-5.3-Flash recipe
+tools/gpu_validate.sh        GPU validation runbook orchestrating `dsv41-tools` suites
 tools/claims/                checks of a patch's promise against a running server
 docs/zig-engine.md           how the pieces fit, and what is not verified
-docs/measurements.md       what was checked and measured on a pair of Sparks
+docs/measurements.md         what was checked and measured on a pair of Sparks
 docs/requirements.md, how-it-works.md, configuration.md, memory-and-safety.md, abliterated.md, spill-and-kv-sharding.md
                              the recipe's setup, settings and safety notes, one page each
 docs/PORT-RECIPE.md          the GLM port's settings, their engine mapping, deploy and rollback

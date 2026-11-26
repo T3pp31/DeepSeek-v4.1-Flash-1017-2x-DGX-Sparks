@@ -3,15 +3,22 @@
 # checkout's root, filename order). The inputs checkout below gets zig/patches-inputs/*.patch the same way (the
 # mixed-pack rank-cache planner). It builds on NVIDIA's PyTorch container, which every Spark already holds: its CUDA
 # toolchain compiles the sm_121 fatbins, its NCCL 2.30.7, cuBLAS and libibverbs are what the engine loads at run time,
-# its PyTorch makes the kit's RoPE tables, and its Python with Pillow decodes the picture formats other than PNG (the
-# engine starts a python3 child for them). No GPU is needed to build.
+# and its PyTorch makes the kit's RoPE tables. Picture decoding uses the native Rust `dsv41-imgdec` binary built below
+# (`TENSORFOLD_IMAGE_DECODER`, patch 0070), avoiding the Python+Pillow child process at runtime. No GPU is needed to build.
 #
 # The two-node branch writes a rank's weight file and Engram's token map only from its Python engine on a first start.
 # So a second checkout, the fork's branch deepseek-v41-zig-tp4 at INPUTS_REF, is built only for what it adds, and only
 # that is kept: tf-dsv41-rank-cache (the weight file from the checkpoint alone, no GPU, no Python; the same file format,
-# which both engines read) and the standalone make_token_map.py and make_rope.py.
-# Built by scripts/prepare.sh, never by hand: it passes the build arguments and a build context of this file and
-# zig/patches only.
+# which both engines read) and the standalone make_token_map.py and make_rope.py (gate_bias_vl is built by `dsv41-ctl`).
+# Built by scripts/prepare.sh, never by hand: it passes the build arguments and a build context of this file,
+# zig/patches, zig/patches-inputs and rust/.
+ARG RUST_IMAGE=rust:1-slim-bookworm
+FROM ${RUST_IMAGE} AS rust-builder
+WORKDIR /rust
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/crates ./crates
+RUN cargo build --release --locked -p dsv41-imgdec -p dsv41-ctl
+
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
 FROM ${BASE_IMAGE}
 # Optional ABLIT preparation uses the image's PyTorch and safetensors on CPU.
@@ -68,12 +75,15 @@ RUN cd /tf-inputs && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=${S
     test -x /opt/inputs/bin/tf-dsv41-rank-cache && \
     cp /opt/inputs/bin/tf-dsv41-rank-cache /opt/tensorfold/bin/ && \
     mkdir -p /opt/tensorfold/tools/inputs && \
-    cp tools/dsv41-zig/inputs/make_token_map.py tools/dsv41-zig/kit/make_rope.py tools/dsv41-zig/kit/make_bias_vl.py \
+    cp tools/dsv41-zig/inputs/make_token_map.py tools/dsv41-zig/kit/make_rope.py \
        /opt/tensorfold/tools/inputs/ && \
     cp LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSE-inputs-branch && \
     rm -rf /tf-inputs /opt/inputs /root/.cache/zig
 
+COPY --from=rust-builder /rust/target/release/dsv41-imgdec /rust/target/release/dsv41-ctl /opt/tensorfold/bin/
+
 ARG PATCHES_HASH
 LABEL tf.patches=${PATCHES_HASH} tf.engine=zig tf.ref=${TF_REF} tf.inputs=${INPUTS_REF}
-ENV PATH=/opt/tensorfold/native/bin:/opt/tensorfold/bin:${PATH}
+ENV PATH=/opt/tensorfold/native/bin:/opt/tensorfold/bin:${PATH} \
+    TENSORFOLD_IMAGE_DECODER=/opt/tensorfold/bin/dsv41-imgdec
 WORKDIR /workspace
